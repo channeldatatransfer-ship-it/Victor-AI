@@ -24,4 +24,4 @@ export type GameBoard = CellValue[][];
 export type Winner = Player | 'tie';
 
 // Types for Games
-export type GameType = 'tic-tac-toe' | 'mind-reader';
+export type GameType = 'tic-tac-toe' | 'mind-reader' | 'guess-the-word' | 'moner-kotha';
