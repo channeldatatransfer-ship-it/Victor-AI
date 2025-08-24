@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Message, Role, Source, GameBoard, Player, Winner } from './types';
-import { getVictorResponseStream, generateVictorImage } from './services/geminiService';
+import { getVictorResponseStream, generateVictorImage, getVictorResponse } from './services/geminiService';
 import { commandHandler } from './services/commandHandler';
 import InputBar from './components/InputBar';
 import ChatWindow from './components/ChatWindow';
@@ -76,20 +76,32 @@ const App: React.FC = () => {
 
   const getVictorGameMove = useCallback(async (board: GameBoard) => {
     setIsGameLoading(true);
-    const prompt = `It is my turn in Tic-Tac-Toe. I am 'O'. The current board state is ${JSON.stringify(board)}. Make your move. Respond ONLY with a JSON object in the format {"action": "game_move", "game": "tic-tac-toe", "move": [row, col]}}.`;
+    const prompt = `Tic-Tac-Toe move request. I am 'O'. Current board: ${JSON.stringify(board)}. Determine the optimal move. Your response must be a valid JSON object following this exact format: {"action": "game_move", "game": "tic-tac-toe", "move": [row, col]}`;
     
-    let moveResponse = "";
     try {
-        const stream = getVictorResponseStream([], prompt);
-        for await (const chunk of stream) {
-            if (chunk.text) { moveResponse += chunk.text; }
+        const response = await getVictorResponse(prompt);
+
+        if (response.error || !response.text) {
+          throw new Error(response.error || "No response text received for game move.");
         }
 
-        const moveJson = JSON.parse(moveResponse.trim());
-        if (moveJson.action === 'game_move' && moveJson.move) {
+        const moveResponseText = response.text.trim();
+        
+        const jsonStartIndex = moveResponseText.indexOf('{');
+        const jsonEndIndex = moveResponseText.lastIndexOf('}');
+
+        if (jsonStartIndex === -1 || jsonEndIndex === -1) {
+            console.error("Invalid response from Victor (not a JSON object):", moveResponseText);
+            throw new Error("Received an invalid non-JSON response from the AI.");
+        }
+        
+        const jsonString = moveResponseText.substring(jsonStartIndex, jsonEndIndex + 1);
+        const moveJson = JSON.parse(jsonString);
+
+        if (moveJson.action === 'game_move' && Array.isArray(moveJson.move) && moveJson.move.length === 2) {
             const [row, col] = moveJson.move;
 
-            if (board[row][col] === null) {
+            if (board[row]?.[col] === null) { // Check for valid coordinates and empty cell
                 const newBoard = board.map(r => [...r]);
                 newBoard[row][col] = 'O';
                 setGameBoard(newBoard);
@@ -101,10 +113,13 @@ const App: React.FC = () => {
                     setCurrentPlayer('X');
                 }
             } else {
-                console.error("Victor made an invalid move.");
-                addMessage(Role.ERROR, "System error: I made an invalid move. Your turn.");
+                console.error(`Victor made an invalid move to (${row}, ${col}), which is occupied or out of bounds.`);
+                addMessage(Role.ERROR, "System error: I selected an invalid cell. Your turn, Operator.");
                 setCurrentPlayer('X');
             }
+        } else {
+            console.error("Invalid JSON structure from Victor:", moveJson);
+            throw new Error("Received a JSON response with an invalid structure.");
         }
     } catch (e) {
         console.error("Failed to get Victor's move", e);
@@ -247,7 +262,7 @@ const App: React.FC = () => {
     } finally {
         setIsLoading(false);
     }
-  }, [messages, play, cancel, autoPlayTTS, isGameActive, addMessage, startGame, getVictorGameMove, handleGameOver]);
+  }, [messages, play, cancel, autoPlayTTS, isGameActive, addMessage, startGame, getVictorGameMove]);
   
   const handleToggleTTS = (message: Message) => {
     if (isSpeaking && currentlySpeakingId === message.id) {
