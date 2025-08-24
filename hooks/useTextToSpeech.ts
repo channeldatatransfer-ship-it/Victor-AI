@@ -12,34 +12,64 @@ export const useTextToSpeech = () => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       setIsSupported(true);
 
-      const findVoice = () => {
+      const findAndSetVoice = () => {
         const voices = window.speechSynthesis.getVoices();
-        let preferredVoice = voices.find(v => v.name === 'Google UK English Male');
-        if (!preferredVoice) {
-            preferredVoice = voices.find(v => v.lang.startsWith('en-') && v.name.includes('Male'));
+        if (voices.length === 0) {
+          return; // Voices not loaded yet.
         }
-        if (!preferredVoice) {
-            preferredVoice = voices.find(v => v.lang.startsWith('en-GB'));
+
+        let selectedVoice: SpeechSynthesisVoice | null = null;
+
+        const preferredVoiceNames = [
+          'Google UK English Male',
+          'Microsoft David - English (United States)',
+          'Daniel', // Apple's high-quality UK voice
+        ];
+
+        // 1. Try to find a preferred, high-quality male voice by name
+        for (const name of preferredVoiceNames) {
+            const found = voices.find(v => v.name === name);
+            if(found) {
+                selectedVoice = found;
+                break;
+            }
         }
-        if (!preferredVoice) {
-            preferredVoice = voices.find(v => v.lang.startsWith('en-'));
+
+        // 2. Fallback: Find any English voice with "male" in its name
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => v.lang.startsWith('en-') && v.name.toLowerCase().includes('male')) || null;
         }
-        setVictorVoice(preferredVoice || null);
+
+        // 3. Fallback: Find any UK English voice (often a male default)
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => v.lang === 'en-GB') || null;
+        }
+
+        // 4. Final Fallback: Find the first available US English voice
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => v.lang === 'en-US') || null;
+        }
+
+        if (selectedVoice) {
+            setVictorVoice(selectedVoice);
+        } else {
+            console.warn("No suitable male English voice found. Using system default.");
+        }
       };
 
-      findVoice();
-      window.speechSynthesis.onvoiceschanged = findVoice;
-      
-      // Keep-alive for the speech synthesis engine.
-      // Some browsers can put the speech synthesis engine to sleep after inactivity.
+      // The 'voiceschanged' event fires when the voice list is populated.
+      window.speechSynthesis.onvoiceschanged = findAndSetVoice;
+      // Also call it directly in case the voices are already loaded.
+      findAndSetVoice();
+
+      // Some browsers (especially on mobile) put the speech synthesis engine to sleep.
       // This interval "pings" it to keep it active.
       keepAliveInterval = window.setInterval(() => {
         const synth = window.speechSynthesis;
         if (synth.paused) {
           synth.resume();
         } else if (!synth.speaking) {
-          // Calling getVoices() is a harmless way to check the state and
-          // can sometimes "wake up" a sleeping synthesis engine.
+          // A harmless call to getVoices() can wake up a sleeping synth.
           synth.getVoices();
         }
       }, 10000);
@@ -53,11 +83,16 @@ export const useTextToSpeech = () => {
   }, []);
 
   const play = useCallback((text: string, id: string) => {
-    if (!isSupported || !text) return;
-    
-    // Resume context just in case it's suspended
-    window.speechSynthesis.resume();
-    window.speechSynthesis.cancel();
+    const synth = window.speechSynthesis;
+    if (!isSupported || !text || !synth) return;
+
+    // If the synth is speaking, cancel the current utterance before starting the new one.
+    if (synth.speaking) {
+      synth.cancel();
+    }
+
+    // Ensure the audio context is active, especially on first user interaction.
+    synth.resume();
 
     const utterance = new SpeechSynthesisUtterance(text);
     if (victorVoice) {
@@ -65,7 +100,7 @@ export const useTextToSpeech = () => {
       utterance.pitch = 0.9;
       utterance.rate = 1.1;
     }
-    
+
     utterance.onstart = () => {
       setIsSpeaking(true);
       setCurrentlySpeakingId(id);
@@ -77,19 +112,20 @@ export const useTextToSpeech = () => {
     };
 
     utterance.onerror = (e: SpeechSynthesisErrorEvent) => {
-      // Don't log benign errors when speech is intentionally stopped.
-      if (e.error === 'interrupted' || e.error === 'canceled') {
-        setIsSpeaking(false);
-        setCurrentlySpeakingId(null);
-        return;
+      // 'canceled' and 'interrupted' are expected errors when we call synth.cancel().
+      if (e.error !== 'canceled' && e.error !== 'interrupted') {
+        console.error(`Speech synthesis error: ${e.error}`);
       }
-      console.error(`Speech synthesis error: ${e.error || 'Details not available. See event object below.'}`);
-      console.error("Full SpeechSynthesisErrorEvent object:", e);
       setIsSpeaking(false);
       setCurrentlySpeakingId(null);
     };
+    
+    // A small timeout helps prevent a race condition in some browsers where
+    // speak() is called too quickly after cancel().
+    setTimeout(() => {
+        synth.speak(utterance);
+    }, 50);
 
-    window.speechSynthesis.speak(utterance);
   }, [isSupported, victorVoice]);
 
   const cancel = useCallback(() => {
