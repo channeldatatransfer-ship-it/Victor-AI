@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Message, Role, Source, GameBoard, Player, Winner } from './types';
+import { Message, Role, Source, GameBoard, Player, Winner, GameType } from './types';
 import { getVictorResponseStream, generateVictorImage, getVictorResponse } from './services/geminiService';
 import { commandHandler } from './services/commandHandler';
 import InputBar from './components/InputBar';
@@ -7,6 +7,7 @@ import ChatWindow from './components/ChatWindow';
 import { useTextToSpeech } from './hooks/useTextToSpeech';
 import TicTacToe from './components/TicTacToe';
 import { checkWinner } from './utils/gameLogic';
+import MindReaderGame from './components/MindReaderGame';
 
 
 const App: React.FC = () => {
@@ -22,7 +23,7 @@ const App: React.FC = () => {
   const { play, cancel, isSpeaking, currentlySpeakingId, isSupported: isTTSSupported } = useTextToSpeech();
 
   // Game State
-  const [isGameActive, setIsGameActive] = useState(false);
+  const [activeGame, setActiveGame] = useState<GameType | null>(null);
   const [gameBoard, setGameBoard] = useState<GameBoard>([
       [null, null, null], [null, null, null], [null, null, null]
   ]);
@@ -33,7 +34,7 @@ const App: React.FC = () => {
   const chatWindowRef = React.useRef<HTMLDivElement>(null);
   useEffect(() => {
     chatWindowRef.current?.scrollTo(0, chatWindowRef.current.scrollHeight);
-  }, [messages, isGameActive]);
+  }, [messages, activeGame]);
 
   const addMessage = useCallback((role: Role, content: string, sources?: Source[], imageUrl?: string) => {
     const newMessage: Message = { id: `${role}-${Date.now()}`, role, content, sources, imageUrl };
@@ -45,14 +46,18 @@ const App: React.FC = () => {
 
   // --- Game Logic ---
 
-  const startGame = useCallback(() => {
-    setIsGameActive(true);
-    setGameBoard([
+  const startGame = useCallback((game: GameType) => {
+    setActiveGame(game);
+    if (game === 'tic-tac-toe') {
+      setGameBoard([
         [null, null, null], [null, null, null], [null, null, null]
-    ]);
-    setCurrentPlayer('X');
-    setWinnerInfo(null);
-    addMessage(Role.MODEL, "Acknowledged. Initializing Tic-Tac-Toe protocol. You are 'X'. Your move.");
+      ]);
+      setCurrentPlayer('X');
+      setWinnerInfo(null);
+      addMessage(Role.MODEL, "Acknowledged. Initializing Tic-Tac-Toe protocol. You are 'X'. Your move.");
+    } else if (game === 'mind-reader') {
+      addMessage(Role.MODEL, "Acknowledged. Initializing Mind Reader protocol.");
+    }
   }, [addMessage]);
 
   const handleGameOver = useCallback((result: { winner: Winner, line: number[] }) => {
@@ -68,7 +73,7 @@ const App: React.FC = () => {
     addMessage(Role.MODEL, message);
     
     setTimeout(() => {
-        setIsGameActive(false);
+        setActiveGame(null);
         setWinnerInfo(null);
     }, 4000); // Reset game state after 4 seconds
   }, [addMessage]);
@@ -153,8 +158,8 @@ const App: React.FC = () => {
 
     cancel();
 
-    if (isGameActive && prompt.toLowerCase().trim() === 'exit game') {
-        setIsGameActive(false);
+    if (activeGame && prompt.toLowerCase().trim() === 'exit game') {
+        setActiveGame(null);
         setWinnerInfo(null);
         addMessage(Role.MODEL, "Game terminated.");
         return;
@@ -233,9 +238,9 @@ const App: React.FC = () => {
                 setMessages(prev => prev.map(m => m.id === modelPlaceholderId ? { ...m, content: executionResult } : m));
                 if (autoPlayTTS) { play("Execution complete.", modelPlaceholderId); }
 
-            } else if (commandJson.action === 'start_game' && commandJson.game === 'tic-tac-toe') {
+            } else if (commandJson.action === 'start_game' && (commandJson.game === 'tic-tac-toe' || commandJson.game === 'mind-reader')) {
                 setMessages(prev => prev.filter(m => m.id !== modelPlaceholderId)); // Remove placeholder
-                startGame();
+                startGame(commandJson.game as GameType);
             } else {
                 isJsonCommand = false; // Not a recognized command
             }
@@ -262,7 +267,7 @@ const App: React.FC = () => {
     } finally {
         setIsLoading(false);
     }
-  }, [messages, play, cancel, autoPlayTTS, isGameActive, addMessage, startGame, getVictorGameMove]);
+  }, [messages, play, cancel, autoPlayTTS, activeGame, addMessage, startGame, getVictorGameMove]);
   
   const handleToggleTTS = (message: Message) => {
     if (isSpeaking && currentlySpeakingId === message.id) {
@@ -297,16 +302,7 @@ const App: React.FC = () => {
         </header>
         
         <div ref={chatWindowRef} className="flex-1 flex flex-col min-h-0 relative z-0 overflow-y-auto">
-            {!isGameActive && (
-              <ChatWindow 
-                messages={messages} 
-                isLoading={isLoading}
-                onToggleTTS={handleToggleTTS}
-                isSpeaking={isSpeaking}
-                currentlySpeakingId={currentlySpeakingId}
-              />
-            )}
-            {isGameActive && (
+            {activeGame ? (
               <>
                 <ChatWindow 
                     messages={messages.slice(-3)} // Show only recent messages during game
@@ -315,19 +311,32 @@ const App: React.FC = () => {
                     isSpeaking={isSpeaking}
                     currentlySpeakingId={currentlySpeakingId}
                 />
-                <TicTacToe 
-                    board={gameBoard}
-                    onPlayerMove={handlePlayerMove}
-                    isPlayerTurn={currentPlayer === 'X' && !isGameLoading && !winnerInfo}
-                    winnerInfo={winnerInfo}
-                    isGameLoading={isGameLoading}
-                />
+                {activeGame === 'tic-tac-toe' && (
+                  <TicTacToe 
+                      board={gameBoard}
+                      onPlayerMove={handlePlayerMove}
+                      isPlayerTurn={currentPlayer === 'X' && !isGameLoading && !winnerInfo}
+                      winnerInfo={winnerInfo}
+                      isGameLoading={isGameLoading}
+                  />
+                )}
+                {activeGame === 'mind-reader' && (
+                  <MindReaderGame />
+                )}
               </>
+            ) : (
+              <ChatWindow 
+                messages={messages} 
+                isLoading={isLoading}
+                onToggleTTS={handleToggleTTS}
+                isSpeaking={isSpeaking}
+                currentlySpeakingId={currentlySpeakingId}
+              />
             )}
         </div>
 
         <footer className="p-4 w-full max-w-4xl mx-auto z-10">
-            <InputBar onSend={handleSend} isLoading={isLoading} isGameActive={isGameActive} />
+            <InputBar onSend={handleSend} isLoading={isLoading} isGameActive={activeGame !== null} />
         </footer>
     </main>
   );

@@ -22,3 +22,6 @@ export type Player = 'X' | 'O';
 export type CellValue = Player | null;
 export type GameBoard = CellValue[][];
 export type Winner = Player | 'tie';
+
+// Types for Games
+export type GameType = 'tic-tac-toe' | 'mind-reader';
