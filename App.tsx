@@ -1,10 +1,13 @@
-import React, { useState, useCallback } from 'react';
-import { Message, Role, Source } from './types';
+import React, { useState, useCallback, useEffect } from 'react';
+import { Message, Role, Source, GameBoard, Player, Winner } from './types';
 import { getVictorResponseStream, generateVictorImage } from './services/geminiService';
 import { commandHandler } from './services/commandHandler';
 import InputBar from './components/InputBar';
 import ChatWindow from './components/ChatWindow';
 import { useTextToSpeech } from './hooks/useTextToSpeech';
+import TicTacToe from './components/TicTacToe';
+import { checkWinner } from './utils/gameLogic';
+
 
 const App: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([
@@ -18,61 +21,153 @@ const App: React.FC = () => {
   const [autoPlayTTS, setAutoPlayTTS] = useState(true);
   const { play, cancel, isSpeaking, currentlySpeakingId, isSupported: isTTSSupported } = useTextToSpeech();
 
+  // Game State
+  const [isGameActive, setIsGameActive] = useState(false);
+  const [gameBoard, setGameBoard] = useState<GameBoard>([
+      [null, null, null], [null, null, null], [null, null, null]
+  ]);
+  const [currentPlayer, setCurrentPlayer] = useState<Player>('X');
+  const [winnerInfo, setWinnerInfo] = useState<{ winner: Winner, line: number[] } | null>(null);
+  const [isGameLoading, setIsGameLoading] = useState(false); // For AI thinking time
+
+  const chatWindowRef = React.useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    chatWindowRef.current?.scrollTo(0, chatWindowRef.current.scrollHeight);
+  }, [messages, isGameActive]);
+
+  const addMessage = useCallback((role: Role, content: string, sources?: Source[], imageUrl?: string) => {
+    const newMessage: Message = { id: `${role}-${Date.now()}`, role, content, sources, imageUrl };
+    setMessages(prev => [...prev, newMessage]);
+    if (role === Role.MODEL && autoPlayTTS && content) {
+        play(content, newMessage.id);
+    }
+  }, [autoPlayTTS, play]);
+
+  // --- Game Logic ---
+
+  const startGame = useCallback(() => {
+    setIsGameActive(true);
+    setGameBoard([
+        [null, null, null], [null, null, null], [null, null, null]
+    ]);
+    setCurrentPlayer('X');
+    setWinnerInfo(null);
+    addMessage(Role.MODEL, "Acknowledged. Initializing Tic-Tac-Toe protocol. You are 'X'. Your move.");
+  }, [addMessage]);
+
+  const handleGameOver = useCallback((result: { winner: Winner, line: number[] }) => {
+    setWinnerInfo(result);
+    let message = "";
+    if (result.winner === 'tie') {
+        message = "The game is a tie. A logical outcome.";
+    } else if (result.winner === 'X') {
+        message = "Congratulations, Operator. You have won.";
+    } else {
+        message = "I have won. The optimal strategy prevailed.";
+    }
+    addMessage(Role.MODEL, message);
+    
+    setTimeout(() => {
+        setIsGameActive(false);
+        setWinnerInfo(null);
+    }, 4000); // Reset game state after 4 seconds
+  }, [addMessage]);
+
+
+  const getVictorGameMove = useCallback(async (board: GameBoard) => {
+    setIsGameLoading(true);
+    const prompt = `It is my turn in Tic-Tac-Toe. I am 'O'. The current board state is ${JSON.stringify(board)}. Make your move. Respond ONLY with a JSON object in the format {"action": "game_move", "game": "tic-tac-toe", "move": [row, col]}}.`;
+    
+    let moveResponse = "";
+    try {
+        const stream = getVictorResponseStream([], prompt);
+        for await (const chunk of stream) {
+            if (chunk.text) { moveResponse += chunk.text; }
+        }
+
+        const moveJson = JSON.parse(moveResponse.trim());
+        if (moveJson.action === 'game_move' && moveJson.move) {
+            const [row, col] = moveJson.move;
+
+            if (board[row][col] === null) {
+                const newBoard = board.map(r => [...r]);
+                newBoard[row][col] = 'O';
+                setGameBoard(newBoard);
+
+                const gameResult = checkWinner(newBoard);
+                if (gameResult) {
+                    handleGameOver(gameResult);
+                } else {
+                    setCurrentPlayer('X');
+                }
+            } else {
+                console.error("Victor made an invalid move.");
+                addMessage(Role.ERROR, "System error: I made an invalid move. Your turn.");
+                setCurrentPlayer('X');
+            }
+        }
+    } catch (e) {
+        console.error("Failed to get Victor's move", e);
+        addMessage(Role.ERROR, "A system malfunction occurred while calculating my move. Your turn.");
+        setCurrentPlayer('X');
+    } finally {
+        setIsGameLoading(false);
+    }
+  }, [addMessage, handleGameOver]);
+
+  const handlePlayerMove = useCallback(async (row: number, col: number) => {
+    if (gameBoard[row][col] !== null || winnerInfo || currentPlayer !== 'X' || isGameLoading) return;
+
+    const newBoard = gameBoard.map(r => [...r]);
+    newBoard[row][col] = 'X';
+    setGameBoard(newBoard);
+
+    const gameResult = checkWinner(newBoard);
+    if (gameResult) {
+        handleGameOver(gameResult);
+    } else {
+        setCurrentPlayer('O');
+        setTimeout(() => getVictorGameMove(newBoard), 500);
+    }
+  }, [gameBoard, winnerInfo, currentPlayer, isGameLoading, handleGameOver, getVictorGameMove]);
+
+  // --- Main Handler ---
+
   const handleSend = useCallback(async (prompt: string) => {
     if (!prompt.trim()) return;
 
     cancel();
+
+    if (isGameActive && prompt.toLowerCase().trim() === 'exit game') {
+        setIsGameActive(false);
+        setWinnerInfo(null);
+        addMessage(Role.MODEL, "Game terminated.");
+        return;
+    }
     
     const userMessage: Message = { id: `user-${Date.now()}`, role: Role.USER, content: prompt };
     setMessages(prevMessages => [...prevMessages, userMessage]);
 
-    // Client-side command handling
     const commandResponse = commandHandler(prompt);
     if (commandResponse) {
-        const victorResponse: Message = {
-            id: `victor-${Date.now()}`,
-            role: Role.MODEL,
-            content: commandResponse,
-        };
-        setMessages(prev => [...prev, victorResponse]);
-        if (autoPlayTTS) {
-            play(commandResponse, victorResponse.id);
-        }
+        addMessage(Role.MODEL, commandResponse);
         return;
     }
 
-    // Image generation command
     const imageGenMatch = prompt.toLowerCase().match(/^(?:show me|generate|create|draw) (?:(?:an? image|a picture) of )?(.+)/i);
     if (imageGenMatch) {
       const imagePrompt = imageGenMatch[1].trim();
       setIsLoading(true);
-      const placeholder: Message = { 
-        id: `victor-img-${Date.now()}`, 
-        role: Role.MODEL, 
-        content: `Acknowledged. Generating image of: ${imagePrompt}...` 
-      };
-      setMessages(prev => [...prev, placeholder]);
+      const placeholderId = `victor-img-${Date.now()}`;
+      addMessage(Role.MODEL, `Acknowledged. Generating image of: ${imagePrompt}...`);
 
       try {
         const imageUrl = await generateVictorImage(imagePrompt);
-        const imageMessage: Message = {
-          id: placeholder.id,
-          role: Role.MODEL,
-          content: `Execution complete.`,
-          imageUrl: imageUrl,
-        };
-        setMessages(prev => prev.map(m => m.id === placeholder.id ? imageMessage : m));
-        if (autoPlayTTS) {
-          play(imageMessage.content, imageMessage.id);
-        }
+        setMessages(prev => prev.map(m => m.id === placeholderId ? { ...m, content: 'Execution complete.', imageUrl } : m));
+        if (autoPlayTTS) { play('Execution complete.', placeholderId); }
       } catch (e) {
         const errorContent = e instanceof Error ? e.message : "An unknown error occurred.";
-        const errorMessage: Message = {
-          id: placeholder.id,
-          role: Role.ERROR,
-          content: errorContent,
-        };
-        setMessages(prev => prev.map(m => m.id === placeholder.id ? errorMessage : m));
+        setMessages(prev => prev.map(m => m.id === placeholderId ? { ...m, role: Role.ERROR, content: errorContent } : m));
       } finally {
         setIsLoading(false);
       }
@@ -80,8 +175,8 @@ const App: React.FC = () => {
     }
     
     setIsLoading(true);
-    const modelPlaceholder: Message = { id: `model-${Date.now()}`, role: Role.MODEL, content: "" };
-    setMessages(prevMessages => [...prevMessages, modelPlaceholder]);
+    const modelPlaceholderId = `model-${Date.now()}`;
+    setMessages(prevMessages => [...prevMessages, { id: modelPlaceholderId, role: Role.MODEL, content: "" }]);
     
     let fullResponse = "";
     let sources: Source[] = [];
@@ -92,38 +187,25 @@ const App: React.FC = () => {
         for await (const chunk of stream) {
             if (chunk.text) {
                 fullResponse += chunk.text;
-                setMessages(prev => {
-                    const newMessages = [...prev];
-                    const targetMessage = newMessages.find(m => m.id === modelPlaceholder.id);
-                    if (targetMessage) {
-                      targetMessage.content = fullResponse;
-                    }
-                    return newMessages;
-                });
+                setMessages(prev => prev.map(m => m.id === modelPlaceholderId ? { ...m, content: fullResponse } : m));
             }
             if (chunk.sources) {
                 sources = [...sources, ...chunk.sources];
             }
             if (chunk.error) {
-                setMessages(prev => {
-                    const newMessages = [...prev];
-                    const targetMessage = newMessages.find(m => m.id === modelPlaceholder.id);
-                    if (targetMessage) {
-                      targetMessage.content = chunk.error as string;
-                      targetMessage.role = Role.ERROR;
-                    }
-                    return newMessages;
-                });
+                setMessages(prev => prev.map(m => m.id === modelPlaceholderId ? { ...m, role: Role.ERROR, content: chunk.error as string } : m));
                 setIsLoading(false);
                 return;
             }
         }
 
         const trimmedResponse = fullResponse.trim();
-        
-        // Check for Python execution command
+        let isJsonCommand = false;
+
         try {
             const commandJson = JSON.parse(trimmedResponse);
+            isJsonCommand = true;
+
             if (commandJson.action === 'execute_python' && commandJson.code) {
                 const response = await fetch('/execute', {
                     method: 'POST',
@@ -132,58 +214,40 @@ const App: React.FC = () => {
                 });
                 const result = await response.json();
                 const output = result.output || `Error: ${result.error}`;
-                
                 const executionResult = `Python script executed. Output:\n\n---\n${output}\n---`;
+                setMessages(prev => prev.map(m => m.id === modelPlaceholderId ? { ...m, content: executionResult } : m));
+                if (autoPlayTTS) { play("Execution complete.", modelPlaceholderId); }
 
-                setMessages(prev => {
-                    const newMessages = [...prev];
-                    const targetMessage = newMessages.find(m => m.id === modelPlaceholder.id);
-                    if (targetMessage) {
-                        targetMessage.content = executionResult;
-                    }
-                    return newMessages;
-                });
-                
-                if (autoPlayTTS) {
-                    play("Execution complete.", modelPlaceholder.id);
-                }
-                return; // End execution here
+            } else if (commandJson.action === 'start_game' && commandJson.game === 'tic-tac-toe') {
+                setMessages(prev => prev.filter(m => m.id !== modelPlaceholderId)); // Remove placeholder
+                startGame();
+            } else {
+                isJsonCommand = false; // Not a recognized command
             }
         } catch (error) {
             // Not a JSON command, proceed as a normal text response
         }
 
-
-        setMessages(prev => {
-            const newMessages = [...prev];
-            const targetMessage = newMessages.find(m => m.id === modelPlaceholder.id);
-            if(targetMessage) {
-                targetMessage.content = trimmedResponse;
-                const uniqueSources = Array.from(new Map(sources.map(item => [item.uri, item])).values());
-                targetMessage.sources = uniqueSources;
+        if (!isJsonCommand) {
+            setMessages(prev => prev.map(m => {
+                if (m.id === modelPlaceholderId) {
+                    const uniqueSources = Array.from(new Map(sources.map(item => [item.uri, item])).values());
+                    return { ...m, content: trimmedResponse, sources: uniqueSources };
+                }
+                return m;
+            }));
+            if (autoPlayTTS && trimmedResponse) {
+              play(trimmedResponse, modelPlaceholderId);
             }
-            return newMessages;
-        });
-
-        if (autoPlayTTS && trimmedResponse) {
-          play(trimmedResponse, modelPlaceholder.id);
         }
 
     } catch (e) {
         const errorMessage = e instanceof Error ? e.message : "An unexpected error occurred.";
-        setMessages(prev => {
-            const newMessages = [...prev];
-            const targetMessage = newMessages.find(m => m.id === modelPlaceholder.id);
-             if(targetMessage) {
-                targetMessage.content = `Critical system failure: ${errorMessage}`;
-                targetMessage.role = Role.ERROR;
-             }
-            return newMessages;
-        });
+        setMessages(prev => prev.map(m => m.id === modelPlaceholderId ? { ...m, role: Role.ERROR, content: `Critical system failure: ${errorMessage}` } : m));
     } finally {
         setIsLoading(false);
     }
-  }, [messages, play, cancel, autoPlayTTS]);
+  }, [messages, play, cancel, autoPlayTTS, isGameActive, addMessage, startGame, getVictorGameMove, handleGameOver]);
   
   const handleToggleTTS = (message: Message) => {
     if (isSpeaking && currentlySpeakingId === message.id) {
@@ -217,18 +281,38 @@ const App: React.FC = () => {
             </div>
         </header>
         
-        <div className="flex-1 flex flex-col min-h-0 relative z-0">
-            <ChatWindow 
-              messages={messages} 
-              isLoading={isLoading}
-              onToggleTTS={handleToggleTTS}
-              isSpeaking={isSpeaking}
-              currentlySpeakingId={currentlySpeakingId}
-            />
+        <div ref={chatWindowRef} className="flex-1 flex flex-col min-h-0 relative z-0 overflow-y-auto">
+            {!isGameActive && (
+              <ChatWindow 
+                messages={messages} 
+                isLoading={isLoading}
+                onToggleTTS={handleToggleTTS}
+                isSpeaking={isSpeaking}
+                currentlySpeakingId={currentlySpeakingId}
+              />
+            )}
+            {isGameActive && (
+              <>
+                <ChatWindow 
+                    messages={messages.slice(-3)} // Show only recent messages during game
+                    isLoading={false}
+                    onToggleTTS={handleToggleTTS}
+                    isSpeaking={isSpeaking}
+                    currentlySpeakingId={currentlySpeakingId}
+                />
+                <TicTacToe 
+                    board={gameBoard}
+                    onPlayerMove={handlePlayerMove}
+                    isPlayerTurn={currentPlayer === 'X' && !isGameLoading && !winnerInfo}
+                    winnerInfo={winnerInfo}
+                    isGameLoading={isGameLoading}
+                />
+              </>
+            )}
         </div>
 
         <footer className="p-4 w-full max-w-4xl mx-auto z-10">
-            <InputBar onSend={handleSend} isLoading={isLoading} />
+            <InputBar onSend={handleSend} isLoading={isLoading} isGameActive={isGameActive} />
         </footer>
     </main>
   );

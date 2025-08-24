@@ -16,3 +16,9 @@ export interface Message {
   sources?: Source[];
   imageUrl?: string;
 }
+
+// Types for Tic-Tac-Toe Game
+export type Player = 'X' | 'O';
+export type CellValue = Player | null;
+export type GameBoard = CellValue[][];
+export type Winner = Player | 'tie';
